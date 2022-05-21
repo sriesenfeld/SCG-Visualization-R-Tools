@@ -8,7 +8,7 @@ library("cowplot") # ggdraw(), plot_grid()
 library("gridExtra") # marrangeGrob()
 library("scales") #viridis_pal()
 library("reshape2") #melt()
-library("plyr")
+library("dplyr")
 # library("Seurat") # Not required but typical
 
 ###### Includes code for top level functions
