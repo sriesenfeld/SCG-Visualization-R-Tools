@@ -8,6 +8,7 @@ library("cowplot") # ggdraw(), plot_grid()
 library("gridExtra") # marrangeGrob()
 library("scales") #viridis_pal()
 library("reshape2") #melt()
+library("plyr")
 library("dplyr")
 # library("Seurat") # Not required but typical
 
@@ -19,8 +20,9 @@ library("dplyr")
 
 # barp.cnts(): plots data as a ggplot2 stacked bar plot of either counts or proportions.
 ## ARGUMENTS
-# groupvars: vector of up to 3 names of factors in data for splitting the groups
-# color.by: the name of a factor in data for the main grouping variable, can be in groupvars or not
+# groupvars: vector of up to 3 names of factors in data, excluding color.by,
+## or 4 names including color.by, for splitting the groups
+# color.by: the name of a factor in data for the main grouping variable
 # colors.v: optional named list of colors corresponding to the levels in the color.by factor 
 # do.prop: Boolean; if TRUE, plot proportions, otherwise counts
 # title: string giving plot title
@@ -30,38 +32,40 @@ library("dplyr")
 # n.col.max: maximum number of panel columns desired (ignored if length(groupvars)>2) 
 barp.cnts <- function(data, groupvars, color.by=groupvars[1], 
                       colors.v=NULL, do.prop=F,
-                      title=paste0(color.by, 
-                                   ifelse(do.prop, " proportions", " counts"), 
-                                   " within ", groupvars[1],
-                                   ifelse(length(groupvars)>1, 
-                                          paste0(", split by ", 
-                                                 paste0(groupvars[2:min(length(groupvars),3)], 
-                                                        collapse=", ")), "")),
+                      title=NULL,
                       bar.width=0.7, show.legend=TRUE, n.col=NULL, n.col.max=10) {
   if (length(groupvars)>3) { warning(paste0("Only the first 3 variables in groupvars will be used"))}
-  vars=c(color.by, setdiff(groupvars, color.by))
-  if (! all (vars %in% colnames(data))) {
-    stop(paste0("Cannot find ", paste0(vars[!vars%in%colnames(data)], collapse=", "), 
+  gvars=setdiff(groupvars, color.by)
+  groupvars=c(color.by, gvars)
+  if (is.null(title)) { 
+    title=paste0(color.by, ifelse(do.prop, " proportions", " counts"), 
+                 " within ", gvars[1],
+                 ifelse(length(gvars)>1, 
+                        paste0(", split by ", paste0(
+                          gvars[2:min(length(gvars),3)], collapse=", ")), "")) 
+  }
+  if (! all (groupvars %in% colnames(data))) {
+    stop(paste0("Cannot find ", paste0(groupvars[!groupvars%in%colnames(data)], collapse=", "), 
                 "in column names of data"))
   }
-  if (! all (sapply(vars, function(x) { is.factor(data[,x])}))) {
+  if (! all (sapply(groupvars, function(x) { is.factor(data[,x])}))) {
     stop("Expecting all variables in groupvars and color.by to name factors in data")
   }
-  p=ggplot(data, aes_string(x=groupvars[1], fill=color.by))
+  p=ggplot(data, aes_string(x=gvars[1], fill=color.by))
   if (do.prop) {
      p=p + geom_bar(position=position_fill(), width=bar.width) + ylab("proportion")
   } else {
     p=p + geom_bar(position=position_stack(), width=bar.width) 
   }
   if (!is.null(colors.v)) { p= p+  scale_fill_manual(values=colors.v) }
-  if (length(groupvars)==2) {
-      n.levels=nlevels(data[,groupvars[2]])
+  if (length(gvars)==2) {
+      n.levels=nlevels(data[,gvars[2]])
       if (is.null(n.col)) { n.col=ifelse(n.levels<n.col.max, n.levels, 
                                          min(n.col.max, ceiling(sqrt(n.levels)))) }
-      p=p+facet_wrap(as.formula(paste0("~", groupvars[2])), 
+      p=p+facet_wrap(as.formula(paste0("~", gvars[2])), 
                      ncol=n.col) 
-  } else if (length(groupvars)>2) {
-    p=p+facet_grid(as.formula(paste0(groupvars[3], "~", groupvars[2])))
+  } else if (length(gvars)>2) {
+    p=p+facet_grid(as.formula(paste0(gvars[3], "~", gvars[2])))
   }
   p= p+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) + ggtitle(title)
   if (!show.legend) { p = p+theme(legend.position="none")}
@@ -743,6 +747,7 @@ multiPanelPlot <- function(plots.l, filename="./multipanel.pdf", do.save=TRUE, r
 }
 
 # summarySE(): Utility function for computing statistics on the data by groups
+## This function needs to be updated as it still uses plyr functions instead of dplyr.
 summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=TRUE,
                       conf.interval=.95, .drop=TRUE) {
   # New version of length which can handle NA's: if na.rm==T, don't count them
