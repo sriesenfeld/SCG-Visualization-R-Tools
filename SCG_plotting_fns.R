@@ -1,64 +1,251 @@
 ## S.J. Riesenfeld
 ## Code for visualization and analysis of single-cell genomic data.
-## 
+## Available here: https://github.com/sriesenfeld/SCG-Visualization-R-Tools
+## Under the BSD 3-Clause "New" or "Revised" License
+
 library("ggpubr") # ggarrange() wrapper for cowplot::plot_grid()
 library("cowplot") # ggdraw(), plot_grid() 
 library("gridExtra") # marrangeGrob()
 library("scales") #viridis_pal()
 library("reshape2") #melt()
+library("plyr")
 # library("Seurat") # Not required but typical
 
-# multiPanelPlot(): a utility function for combining ggplots into a single plot
+###### Includes code for top level functions
+# barp.cnts(), plotViolins(), image_matrix(), plot.embed.fac(), plot.embed.genes(), plot.embed.features()
+###### and the utility functions
+# get.colors.wcap(), get.viridis.col(), multiPanelPlot(), and high.loadings()
+######
+
+# barp.cnts(): plots data as a ggplot2 stacked bar plot of either counts or proportions.
+## ARGUMENTS
+# groupvars: vector of up to 3 names of factors in data for splitting the groups
+# color.by: the name of a factor in data for the main grouping variable, can be in groupvars or not
+# colors.v: optional named list of colors corresponding to the levels in the color.by factor 
+# do.prop: Boolean; if TRUE, plot proportions, otherwise counts
+# title: string giving plot title
+# bar.width: numeric value passed as width to geom_bar()
+# show.legend: Boolean; if FALSE, the color legend is removed
+# n.col: number of panel columns desired (ignored if length(groupvars)>2
+# n.col.max: maximum number of panel columns desired (ignored if length(groupvars)>2) 
+barp.cnts <- function(data, groupvars, color.by=groupvars[1], 
+                      colors.v=NULL, do.prop=F,
+                      title=paste0(color.by, 
+                                   ifelse(do.prop, " proportions", " counts"), 
+                                   " within ", groupvars[1],
+                                   ifelse(length(groupvars)>1, 
+                                          paste0(", split by ", 
+                                                 paste0(groupvars[2:min(length(groupvars),3)], 
+                                                        collapse=", ")), "")),
+                      bar.width=0.7, show.legend=TRUE, n.col=NULL, n.col.max=10) {
+  if (length(groupvars)>3) { warning(paste0("Only the first 3 variables in groupvars will be used"))}
+  vars=c(color.by, setdiff(groupvars, color.by))
+  if (! all (vars %in% colnames(data))) {
+    stop(paste0("Cannot find ", paste0(vars[!vars%in%colnames(data)], collapse=", "), 
+                "in column names of data"))
+  }
+  if (! all (sapply(vars, function(x) { is.factor(data[,x])}))) {
+    stop("Expecting all variables in groupvars and color.by to name factors in data")
+  }
+  p=ggplot(data, aes_string(x=groupvars[1], fill=color.by))
+  if (do.prop) {
+     p=p + geom_bar(position=position_fill(), width=bar.width) + ylab("proportion")
+  } else {
+    p=p + geom_bar(position=position_stack(), width=bar.width) 
+  }
+  if (!is.null(colors.v)) { p= p+  scale_fill_manual(values=colors.v) }
+  if (length(groupvars)==2) {
+      n.levels=nlevels(data[,groupvars[2]])
+      if (is.null(n.col)) { n.col=ifelse(n.levels<n.col.max, n.levels, 
+                                         min(n.col.max, ceiling(sqrt(n.levels)))) }
+      p=p+facet_wrap(as.formula(paste0("~", groupvars[2])), 
+                     ncol=n.col) 
+  } else if (length(groupvars)>2) {
+    p=p+facet_grid(as.formula(paste0(groupvars[3], "~", groupvars[2])))
+  }
+  p= p+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) + ggtitle(title)
+  if (!show.legend) { p = p+theme(legend.position="none")}
+  return(p)
+}
+
+# plotViolins(): function for plotting numeric data as violins split by groups
 ## ARGUMENTS:
-# plots.l: list of ggplot plots
-# filename: where plot is saved, if do.save==TRUE
-# do.save: Boolean, if TRUE, save plot to file named by filename argument
-# return.plot: Boolean; if TRUE, return the plot that is created; else return nothing
-# common.legend: Boolean; if TRUE, create a common legend for all the plots
-# title: title for combined plot
-# subtitle: subtitle for combined plot
-# title.size: font size for title
-# subtitle.size: font size for subtitle
-# base_height: height for individual panels, passed as base_height to save_plot
-# base_asp: the aspect ratio (width/height) of one subplot; 
-##  default of 1.618 (the golden ratio) works well for figures with a legend 
-# rel.height.title: relative height for title space in combined plot
-# align: Passed as align argument to ggarrange
-# n.col.max: Maximum number of columns desired in 1-page grid 
-# n.row.max: Maximum number of rows desired in 1-page grid;
-##  if length(plots.l) > n.col.max*n.row.max, then a pdf of multiple pages 
-##    will be created, as many as required to include all plots in plots.l
-multiPanelPlot <- function(plots.l, filename="./multipanel.pdf", do.save=TRUE, return.plot=FALSE,
-                           common.legend=FALSE, 
-                           title="", subtitle="", title.size=11, subtitle.size=7, 
-                           base_height=3.71, base_asp=1.618,
-                           rel.height.title=0.1,
-                           align="hv", #pmarg=unit(c(1,1,1,1), "pt"), 
-                           n.col.max=10, n.row.max=10, 
-                           n.col=ifelse(length(plots.l)<n.col.max, length(plots.l), 
-                                        min(n.col.max, ceiling(sqrt(length(plots.l))))), 
-                           n.row=min(n.row.max, ceiling(length(plots.l)/n.col))) {
-  n.pp=n.row*n.col;#   print(n.pp)
-  #print(length(plots.l))
-  multip.flag=FALSE
-  if (length(plots.l)>n.pp) { 
-    multip.flag=TRUE
+# measurevars: vector of names of rows in num.data corresponding to numeric variables to be plotted 
+# groupvars: vector of names of columns in metadata corresponding to grouping factors
+# ob: optional Seurat object
+# num.data: numeric matrix, whose column names match the row names of metadata
+# metadata: data.frame of features of the column names of num.data
+# measurevar.name: name of the type of variable being plotted, e.g., "gene"
+# measure.name: name of the type of numeric data being plotted, e.g., "expression"
+# color.by: name of factor in metadata by which the violins should be colored 
+# colors.v: named vector of colors corresponding to the levels of color.by factor
+# color.def: default color of violins if color.by is NULL
+# quantiles: vector quantiles to be plotted on top of violins, passed as draw_quantiles to
+##  geom_violin(); can be finicky, default of the median usually works
+# adjust: numeric value passed as adjust to geom_violin()
+# scale: passed as scale to geom_violin()
+# facet.scales: passed as scales to facet_wrap()
+# plot.means: Boolean; if TRUE, plot mean values on top of violins
+# means.shape, means.size, means.fill, means.color: passed as 
+##  shape, size, fill, and color, respectively to geom_point() for plotting mean values
+# n.col: desired number of panel columns (ignored if there is more than one facet)
+# n.col.max: max desired number of panel columns (ignored if there is more than one facet)
+# strip.text.size, strip.text.face: font size and face for panel titles
+# axis.title.size: font size for axis titles
+# axis.x.text.size, axis.y.text.size: font sizes for x and y axis text, respectively
+# rotate.axis.text.x: Boolean, if TRUE, rotate x axis text
+# panel.spacing: if not NULL, passed to theme() as panel.spacing=unit(panel.spacing, "points")
+# size.geom: passed as size to ggplot()
+# cc.ylim: if not NULL, ylimites of coordinates are adjusted by coord_cartesian(ylim=cc.ylim) 
+# no.legend: Boolean, if TRUE, remove color legend
+# base_theme: ggplot2 base theme to use
+# no.x.axis.tick.labels: Boolean, if TRUE, remove x axis tick labels
+plotViolins<- function(measurevars, groupvars, ob=NULL,
+                       num.data=GetAssayData(ob), metadata=ob[[]],
+                       measurevar.name="variable", measure.name="value",
+                       color.by=NULL, colors.v=NULL, color.def="gray50", 
+                       quantiles=c(0.5), adjust=1.25, scale="width", facet.scales="free_y", 
+                       plot.means=T, #plot.means.df=NULL, 
+                       means.shape=23, means.size=1.5, 
+                       means.fill="white", means.color="black",
+                       n.col=NULL, n.col.max=10, # only applies if there is at most 1 facet
+                       strip.text.size=10, strip.text.face="italic", 
+                       axis.title.size=8, 
+                       axis.x.text.size=8, axis.y.text.size=8, 
+                       rotate.axis.text.x=T, #rotate.axis.text.y=F, 
+                       panel.spacing=NULL, size.geom=0.5, 
+                       cc.ylim=NULL, 
+                       no.legend=F, base_theme=theme_bw(),
+                       no.x.axis.tick.labels=((!no.legend) && (!is.null(color.by)) 
+                                              && (color.by %in% groupvars))) {
+  if (!all(measurevars %in% rownames(num.data))) { 
+    warning(paste0("Cannot find ", paste0(measurevars[!measurevars %in% rownames(num.data)], collapse=", "), 
+                   " in row names of num.data, so removing it")) 
+    measurevars=measurevars[measurevars%in% rownames(num.data)]
+  }
+  if (length(measurevars)==0) { stop("Need measurevars to have length at least 1")}
+  if (!all(colnames(num.data)==rownames(metadata))) { 
+    stop("Column names of num.data should match row names of metadata")}
+  if (!all(groupvars %in% colnames(metadata))) { 
+    stop(paste0("Cannot find ", paste0(groupvars[!groupvars %in% colnames(metadata)], collapse=", "),
+                " in column names of metadata" )) }
+  if (!all(sapply(metadata[,groupvars,drop=FALSE], is.factor))) { 
+    stop(paste0("Expecting ", groupvars[!sapply(metadata[,groupvars,drop=FALSE], is.factor)], 
+                " to name factors in metadata")) }
+  if (!is.null(color.by)) { 
+    if (!color.by %in% colnames(metadata)) { 
+      stop(paste0("Cannot find ", color.by ," in column names of metadata" )) }
+    if (!is.factor(metadata[,color.by])) { stop("Expecting ", color.by , " to name a factor in metadata") }
+  }
+  xvar=measurevar.name; groupvars.fct=NULL
+  if (length(groupvars)>0) { 
+    xvar=groupvars[1] 
+    if (length(measurevars)>1) {
+      groupvars.fct=measurevar.name
+      if (length(groupvars)>=2) { 
+        if (length(groupvars)>2) { warning("If measurevars has length >1, then only the first two entries of groupvars are used") }
+        groupvars.fct=c(groupvars[2], measurevar.name)
+      } 
+    } else if (length(groupvars)>1) {
+      if (length(groupvars) > 3) { warning("Only the first three entries of groupvars are used") }
+      groupvars.fct=groupvars[2:min(3,length(groupvars))]
     }
-  ggarrange.args=list(ncol=n.col, common.legend=common.legend, align=align)
-  title <- ggdraw() + draw_label(title, fontface='bold', size=title.size)
-  plots.pp=do.call(ggarrange, c(ggarrange.args, list(plotlist=plots.l, nrow=n.row)))
-  if (!multip.flag) { plots.pp=list(plots.pp) }
-  plots.pp=lapply(plots.pp, function(p) { add_sub(p, label=subtitle, size=subtitle.size, fontface="bold") })
-  plots.pp=lapply(plots.pp, function(p) {plot_grid(title, p, ncol=1, rel_heights=c(rel.height.title, 1))})
-  p=do.call(marrangeGrob, c(list(plots.pp), list(nrow = 1, ncol = 1), top=""))
-  if (do.save) {
-    print(paste0("Saving plot to file ", filename))
-    if(multip.flag) { print(paste0("File of multiple pages required"))}
-    save_plot(filename=filename, plot=p, base_height=base_height, base_asp=base_asp,
-              ncol=n.col, nrow=n.row)
   } 
-  if (return.plot) { return(p) 
-  } else {return()}
+  regroup.vars=setdiff(unique(c(xvar, groupvars.fct, color.by)), measurevar.name)
+  data=melt(data.frame(t(num.data[measurevars,,drop=FALSE]),
+                       metadata[,regroup.vars,drop=FALSE]), id.vars=regroup.vars)
+  colnames(data)[colnames(data)=="variable"]=measurevar.name
+  colnames(data)[colnames(data)=="value"]=measure.name
+  #if (is.null(plot.means.df)) {
+  plot.means.df <- summarySE(data, measurevar=measure.name, groupvars=c(regroup.vars, measurevar.name))
+  #}  
+  if (is.null(color.by)) {
+    p = ggplot(data, aes_string(x=xvar, y=measure.name), fill=color.by, size=size.geom)
+  } else {
+    p = ggplot(data, aes_string(x=xvar, y=measure.name, fill=color.by), size=size.geom) 
+  }
+  p=p+geom_violin(adjust=adjust, scale=scale, draw_quantiles=quantiles)
+  if (!is.null(colors.v)) { p = p + scale_fill_manual(values=colors.v) }
+  p=p+base_theme
+  if (length(groupvars.fct)==1) { 
+    n.levels=nlevels(data[,groupvars.fct])
+    if (is.null(n.col)) { n.col=ifelse(n.levels<n.col.max, n.levels, 
+                                       min(n.col.max, ceiling(sqrt(n.levels)))) }
+    p=p+facet_wrap(groupvars.fct[1], ncol=n.col, scales=facet.scales) 
+  } else if (length(groupvars.fct)>1) { 
+    p=p+facet_grid(paste0(groupvars.fct[2], "~", groupvars.fct[1]),  scales=facet.scales) 
+  }
+  if (plot.means) {
+    p= p+ geom_point(data=plot.means.df, stat="identity", color=means.color, fill=means.fill, shape=means.shape, size=means.size) 
+  }
+  if (rotate.axis.text.x){ p=p+ theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) }
+  p=p+theme(axis.text.x= element_text(size=axis.x.text.size), 
+            axis.text.y= element_text(size=axis.y.text.size),
+            axis.title=element_text(size=axis.title.size),
+            strip.text = element_text(size = strip.text.size, face=strip.text.face))
+  if (no.x.axis.tick.labels) {
+    p=p+ theme(axis.text.x = element_blank())
+  }
+  if (!is.null(panel.spacing)) { 
+    p=p+ theme(panel.spacing=unit(panel.spacing, "points"))
+  }
+  if (no.legend) { p=p+theme(legend.position="none") }
+  if (!is.null(cc.ylim)) { 
+    p=p+coord_cartesian(ylim=cc.ylim) } ## does a zoom without throwing out any data
+  return(p)
+}
+
+
+# image_matrix(): Function for plotting a matrix as an image
+## ARGUMENTS:
+# mm: numeric or factor matrix
+# colors.v: color values
+# no.axis.text.x; Boolean, if TRUE, remove x axis text
+# no.axis.text.y: Boolean, if TRUE< remove y axis text
+# rotate.axis.text.x: Boolean, if TRUE rotate x axis text
+# axis.pos.x: string specifying the x axis position
+# categ: Boolean, if TRUE, treat data in mm as discrete
+# xlab, ylab: strings giving x and y axis labels, respectively
+# title: string giving plot title
+image_matrix <- function(mm, colors.v=NULL,
+                         no.axis.text.x=FALSE, no.axis.text.y=TRUE,
+                         rotate.axis.text.x=TRUE,
+                         axis.pos.x=c("top", "bottom"),
+                         categ=TRUE, xlab="", ylab="", title="") {
+  axis.pos.x=match.arg(axis.pos.x)
+  mm.df=do.call(rbind, lapply(1:ncol(mm), function(i) {
+    return(data.frame(
+      "cols"=rep(i,nrow(mm)),
+      "rows"=rev(1:nrow(mm)),
+      "value"=mm[,i])) })) 
+  print(dim(mm.df))
+  mm.df$cols=factor(mm.df$cols, labels=colnames(mm))
+  mm.df$rows=factor(mm.df$rows, labels=rownames(mm))
+  if (categ) { 
+    mm.df$value=factor(mm.df$value) 
+  }
+  p=ggplot(mm.df, aes(x=cols,y=rows,fill=value))
+  if (!is.null(colors.v)) {
+    if (categ) { 
+      p=p+ scale_fill_manual(values=colors.v)
+    } else {
+      p=p+ scale_fill_gradientn(colors = colors.v)
+    }
+  }
+  p=p+scale_x_discrete(name=xlab, expand=expansion(0), position=axis.pos.x) +
+    scale_y_discrete(name=ylab, expand=expansion(0))
+  p=p+geom_raster() + theme_bw()  
+  if (no.axis.text.x) {
+    p=p+ theme(axis.text.x = element_blank()) }
+  if (no.axis.text.y) {
+    p=p+ theme(axis.text.y = element_blank()) }
+  if (rotate.axis.text.x){ 
+    hjust=ifelse(axis.pos.x=="top", 0, 1)
+    vjust=ifelse(axis.pos.x=="top", 0, 1)
+    p=p+ theme(axis.text.x = 
+                 element_text(angle=60, vjust=vjust, hjust=hjust)) }
+  p=p+ggtitle(title)
+  return(p)
 }
 
 # plot.embed.fac(): plot a factor (i.e., categorical variable) on a 2d embedding
@@ -103,7 +290,7 @@ multiPanelPlot <- function(plots.l, filename="./multipanel.pdf", do.save=TRUE, r
 # common.legend, title, subtitle, title.size, subtitle.size, base_height, 
 ##  base_asp, rel.height.title, align, n.col.max, n.row.max, n.col, and n.row: 
 ##  Passed to multiPanelPlot()
-plot.embed.fac = function(ob=NULL, fac.name=NULL, fac.v=ob[[fac.name]][,1], 
+plot.embed.fac = function(ob=NULL, fac.name=NULL, fac.v=ob[[fac.name]][,1],  
                          embed.xy=Embeddings(ob, "umap"), do.facet.gray=TRUE, 
                          facet.levels=levels(fac.v), colorsv=NULL, 
                          color.gray="gray85", color.highlight="orangered1", 
@@ -121,7 +308,7 @@ plot.embed.fac = function(ob=NULL, fac.name=NULL, fac.v=ob[[fac.name]][,1],
                          base_theme_min=TRUE,
                          common.legend=FALSE, 
                          title="", subtitle="", title.size=14, subtitle.size=9, 
-                         base_height=4.25, base_asp=ifelse(no.legend, 1.0, 1.618),
+                         base_height=3.75, base_asp=ifelse(no.legend, 1.0, 1.618),
                          rel.height.title=0.1,
                          align="hv", #pmarg=unit(c(1,1,1,1), "pt"), 
                          n.col.max=10, n.row.max=15, 
@@ -132,18 +319,17 @@ plot.embed.fac = function(ob=NULL, fac.name=NULL, fac.v=ob[[fac.name]][,1],
   if (!is.factor(fac.v)) {
     stop("Expecting a factor")
   }
-  #print(n.col)
   if (no.legend) { leg.pos="none"}
   facet.other=F; o=order(fac.v)
   data.plot=data.frame(embed.xy, "gp"=fac.v)[o,]; #print(head(data.plot)) #print(levels(data.plot$gp))
   colnames(data.plot)[c(1,2)]=c("x","y")
   plots.l=NULL
   if (do.facet.gray) {
-    if (is.null(colorsv) || is.na(colorsv) || (length(colorsv)==0)) {
-      colorsv=rep(color.highlight, length(levels(fac.v))); names(colorsv)=levels(fac.v)
+    if (is.null(colorsv) || (length(colorsv)==0)) {
+      colorsv=rep(color.highlight, nlevels(fac.v)); names(colorsv)=levels(fac.v)
     } else if (length(colorsv) != length(facet.levels)) {
       stop(paste0("If colorsv vector is specified, its length must be equal to the length of facet.levels"))
-    }
+    } 
     plots.l=lapply(facet.levels, function(c) {
       plot.df=data.plot; plot.df$gp=factor(plot.df$gp, levels=c(setdiff(levels(plot.df$gp), c),c))
       plot.df=plot.df[order(plot.df$gp),]
@@ -210,7 +396,6 @@ plot.embed.fac = function(ob=NULL, fac.name=NULL, fac.v=ob[[fac.name]][,1],
   return(plots.l)
 }
 
-
 # plot.embed.genes(): create plots of expression of genes on 2d embedding
 ##  Need at minimum genes.plot, data, and embed.xy to be specified.
 ## ARGUMENTS:
@@ -273,13 +458,13 @@ plot.embed.genes = function(genes, ob=NULL, embed.xy=Embeddings(ob, "umap"),
                            xlim=NULL, ylim=NULL,
                            base_theme_min=TRUE,
                            common.legend=FALSE, title="", subtitle="",  
-                           title.size=10, subtitle.size=9, 
-                           base_height=3.5, base_asp=1.3,
+                           title.size=14, subtitle.size=9, 
+                           base_height=3.5, base_asp=1.1,
                            rel.height.title=0.1, 
                            align="hv", pmarg=unit(c(1,1,1,1), "pt"), 
                            n.col.max=10, n.row.max=15, 
                            ...) {
-  ord=match.arg(ord, )
+  ord=match.arg(ord )
   genes.plot=genes[genes %in% rownames(data)]
   if (length(genes)!=length(genes.plot)) {
     warning(paste0("Some genes were not found in row names: ", 
@@ -501,6 +686,89 @@ get.viridis.col <- function(range.val=NULL, mid.val=NULL, n.steps.final=11,
   }
   #print(cols)
   return(cols)
+}
+
+
+# multiPanelPlot(): a utility function for combining ggplots into a single plot
+## ARGUMENTS:
+# plots.l: list of ggplot plots
+# filename: where plot is saved, if do.save==TRUE
+# do.save: Boolean, if TRUE, save plot to file named by filename argument
+# return.plot: Boolean; if TRUE, return the plot that is created; else return nothing
+# common.legend: Boolean; if TRUE, create a common legend for all the plots
+# title: title for combined plot
+# subtitle: subtitle for combined plot
+# title.size: font size for title
+# subtitle.size: font size for subtitle
+# base_height: height for individual panels, passed as base_height to save_plot
+# base_asp: the aspect ratio (width/height) of one subplot; 
+##  default of 1.618 (the golden ratio) works well for figures with a legend 
+# rel.height.title: relative height for title space in combined plot
+# align: Passed as align argument to ggarrange
+# n.col.max: Maximum number of columns desired in 1-page grid 
+# n.row.max: Maximum number of rows desired in 1-page grid;
+##  if length(plots.l) > n.col.max*n.row.max, then a pdf of multiple pages 
+##    will be created, as many as required to include all plots in plots.l
+multiPanelPlot <- function(plots.l, filename="./multipanel.pdf", do.save=TRUE, return.plot=FALSE,
+                           common.legend=FALSE, 
+                           title="", subtitle="", title.size=11, subtitle.size=7, 
+                           base_height=3.71, base_asp=1.618,
+                           rel.height.title=0.1,
+                           align="hv", #pmarg=unit(c(1,1,1,1), "pt"), 
+                           n.col.max=10, n.row.max=10, 
+                           n.col=ifelse(length(plots.l)<n.col.max, length(plots.l), 
+                                        min(n.col.max, ceiling(sqrt(length(plots.l))))), 
+                           n.row=min(n.row.max, ceiling(length(plots.l)/n.col))) {
+  n.pp=n.row*n.col;#   print(n.pp)
+  #print(length(plots.l))
+  multip.flag=FALSE
+  if (length(plots.l)>n.pp) { 
+    multip.flag=TRUE
+  }
+  ggarrange.args=list(ncol=n.col, common.legend=common.legend, align=align)
+  title <- ggdraw() + draw_label(title, fontface='bold', size=title.size)
+  plots.pp=do.call(ggarrange, c(ggarrange.args, list(plotlist=plots.l, nrow=n.row)))
+  if (!multip.flag) { plots.pp=list(plots.pp) }
+  plots.pp=lapply(plots.pp, function(p) { add_sub(p, label=subtitle, size=subtitle.size, fontface="bold") })
+  plots.pp=lapply(plots.pp, function(p) {plot_grid(title, p, ncol=1, rel_heights=c(rel.height.title, 1))})
+  p=do.call(marrangeGrob, c(list(plots.pp), list(nrow = 1, ncol = 1), top=""))
+  if (do.save) {
+    print(paste0("Saving plot to file ", filename))
+    if(multip.flag) { print(paste0("File of multiple pages required"))}
+    save_plot(filename=filename, plot=p, base_height=base_height, base_asp=base_asp,
+              ncol=n.col, nrow=n.row)
+  } 
+  if (return.plot) { return(p) 
+  } else {return()}
+}
+
+# summarySE(): Utility function for computing statistics on the data by groups
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=TRUE,
+                      conf.interval=.95, .drop=TRUE) {
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=na.rm),
+                     mean = mean   (xx[[col]], na.rm=na.rm),
+                     sd   = sd     (xx[[col]], na.rm=na.rm)
+                   )
+                 },
+                 measurevar
+  )
+  colnames(datac)[which(colnames(datac)=="mean")]=measurevar
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  return(datac)
 }
 
 # high.loadings(): Utility function for getting the variables associated with each PC.
